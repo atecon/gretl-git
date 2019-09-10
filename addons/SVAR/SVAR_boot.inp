@@ -508,18 +508,77 @@ function scalar SVAR_boot(bundle *m,
     printf "\nBootstrapping model (%d iterations)\n", m.nboot
     printf "Bootstrap type: %s\n", btypestring(m.boottype)
     printf "Bias correction: %s\n\n", BCstring(m.biascorr)
-    flush
 
-    # Define needed objects for bootstrap
-    matrix bootirfs, Spar_mat
-
-    # Allow for later generalization of parallel execution
-    localiter = m.nboot
 
     ########### Main bootstrap work ###########
 
-    failed = SVARbootworker(localiter, &bootirfs, &Spar_mat, bobj,m)
-    ###########################################
+	if $sysinfo.mpi && m.nboot > 2000
+		printf " Running parallel bootstrap (MPI), "	
+		P = 2 # $sysinfo.nproc	--hyperthreading ?!
+		printf "size %d\n", P
+		flush
+
+		# write out the bundles to load them back inside MPI
+		# (hardcoded names) 
+		errm = bwrite(m, "SVAR_MPI_m.gz", 1)
+		errb = bwrite(bobj, "SVAR_MPI_bobj.gz", 1)
+		if errm + errb > 0
+			funcerr "writing bundles for MPI failed"
+		endif
+		
+
+		mpi --send-functions
+			# Define needed objects for bootstrap
+    		matrix bootirfs, Spar_mat
+			bundle mpim, mpibobj
+
+			# Retrieve ingredients
+			if $mpirank == 0
+				mpim = bread("SVAR_MPI_m.gz")
+				mpibobj = bread("SVAR_MPI_bobj.gz")
+				
+				# debug:
+				print "read the bundles alright"
+			endif
+
+			mpibcast(&mpim)
+			mpibcast(&mpibobj)
+			localiter = floor(mpim.nboot / $mpisize)
+			failed = SVARbootworker(localiter, &bootirfs, &Spar_mat, mpibobj,mpim)
+
+			# combine the results (stacking)
+			mpireduce(&bootirfs, vcat)
+			mpireduce(&Spar_mat, vcat)
+			mpireduce(&failed, sum)
+			mpireduce(&localiter, sum)
+
+			# Transfer results (binary for speed)
+			if $mpirank == 0
+				mwrite({localiter, failed}, "SVAR_MPI_iterfail.mat")
+				mwrite(bootirfs, "SVAR_MPI_bootirfs.bin")
+				mwrite(Spar_mat, "SVAR_MPI_Spar_mat.bin")
+			endif			
+		
+		end mpi --np=P --omp-threads=1
+
+		# Read in the MPI results
+		matrix iterfail = mread("SVAR_MPI_iterfail.mat", 1)
+		m.nboot = iterfail[1]	# could be slightly less (rounding)
+		failed = iterfail[2]
+		matrix bootirfs = mread("SVAR_MPI_bootirfs.bin", 1)
+		matrix Spar_mat = mread("SVAR_MPI_Spar_mat.bin", 1)
+
+		# TODO: clean up all the temp files in the dotdir
+
+	else
+		# (no MPI support, just do the normal sequential thing)
+		flush
+		# Define needed objects for bootstrap
+    	matrix bootirfs, Spar_mat
+    	failed = SVARbootworker(m.nboot, &bootirfs, &Spar_mat, bobj,m)
+	endif
+
+    ############ end main bootstrap ###############################
 
     if !quiet
         boot_printout(m.type, m.n, m.nboot, failed, Spar_mat)
