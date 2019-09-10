@@ -430,6 +430,27 @@ function scalar SVARbootworker(int iter,
     return failed
 end function
 
+#----
+function scalar isMPIok(const bundle m)
+	scalar mpiok = $sysinfo.mpi	# Is MPI present at all? 
+	mpiok = mpiok && m.nboot > 1000	# do no trivial stuff
+
+	if inbundle(m, "forcempi")	# user override
+		mpiok = m.forcempi
+	endif
+
+	# and because MPI broken on 2019c on Windows...
+	if $windows && $version == 20192 && $sysinfo.mpi 
+		print "Can't do parallel bootstrap on Windows with gretl 2019c."
+		print " Falling back to sequential setup."
+		print " (Consider upgrading gretl, if possible.)"
+		mpiok = 0
+	endif	
+	return mpiok 
+end function 
+
+#----
+
 
 function scalar SVAR_boot(bundle *m,
                           int rep[0::2000] "bootstrap iterations",
@@ -512,9 +533,9 @@ function scalar SVAR_boot(bundle *m,
 
     ########### Main bootstrap work ###########
 
-	if $sysinfo.mpi && m.nboot > 2000
+	if isMPIok(m)
 		printf " Running parallel bootstrap (MPI), "	
-		P = 2 # $sysinfo.nproc	--hyperthreading ?!
+		P = xmin(4, $sysinfo.nproc)
 		printf "size %d\n", P
 		flush
 
@@ -523,7 +544,10 @@ function scalar SVAR_boot(bundle *m,
 		errm = bwrite(m, "SVAR_MPI_m.gz", 1)
 		errb = bwrite(bobj, "SVAR_MPI_bobj.gz", 1)
 		if errm + errb > 0
-			funcerr "writing bundles for MPI failed"
+			print "Writing bundles for MPI failed (parallel bootstrap)."
+			print "Can use: <ModelBundle>.mpiforce = 0"
+			print " before calling SVAR_boot to switch off MPI usage."
+			funcerr "error writing bundles for MPI"
 		endif
 		
 
@@ -534,11 +558,11 @@ function scalar SVAR_boot(bundle *m,
 
 			# Retrieve ingredients
 			if $mpirank == 0
-				mpim = bread("SVAR_MPI_m.gz")
-				mpibobj = bread("SVAR_MPI_bobj.gz")
+				mpim = bread("SVAR_MPI_m.gz", 1)
+				mpibobj = bread("SVAR_MPI_bobj.gz", 1)
 				
 				# debug:
-				print "read the bundles alright"
+				# print "read the bundles alright"
 			endif
 
 			mpibcast(&mpim)
@@ -554,9 +578,9 @@ function scalar SVAR_boot(bundle *m,
 
 			# Transfer results (binary for speed)
 			if $mpirank == 0
-				mwrite({localiter, failed}, "SVAR_MPI_iterfail.mat")
-				mwrite(bootirfs, "SVAR_MPI_bootirfs.bin")
-				mwrite(Spar_mat, "SVAR_MPI_Spar_mat.bin")
+				mwrite({localiter, failed}, "SVAR_MPI_iterfail.mat", 1)
+				mwrite(bootirfs, "SVAR_MPI_bootirfs.bin", 1)
+				mwrite(Spar_mat, "SVAR_MPI_Spar_mat.bin", 1)
 			endif			
 		
 		end mpi --np=P --omp-threads=1
@@ -568,7 +592,7 @@ function scalar SVAR_boot(bundle *m,
 		matrix bootirfs = mread("SVAR_MPI_bootirfs.bin", 1)
 		matrix Spar_mat = mread("SVAR_MPI_Spar_mat.bin", 1)
 
-		# TODO: clean up all the temp files in the dotdir
+		# TODO: clean up all the temp files in the dotdir?
 
 	else
 		# (no MPI support, just do the normal sequential thing)
