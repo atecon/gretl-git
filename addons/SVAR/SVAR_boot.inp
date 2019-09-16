@@ -439,13 +439,6 @@ function scalar isMPIok(const bundle m)
 		mpiok = m.forcempi
 	endif
 
-	# and because MPI broken on 2019c on Windows...
-	if $windows && $version == 20192 && $sysinfo.mpi 
-		print "Can't do parallel bootstrap on Windows with gretl 2019c."
-		print " Falling back to sequential setup."
-		print " (Consider upgrading gretl, if possible.)"
-		mpiok = 0
-	endif	
 	return mpiok 
 end function 
 
